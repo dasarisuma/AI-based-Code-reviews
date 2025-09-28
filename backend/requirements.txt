@@ -7,3 +7,4 @@ groq
 python-dotenv
 requests
 GitPython
+networkx

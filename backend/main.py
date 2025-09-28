@@ -57,6 +57,7 @@ except ValueError as e:
 github_service = GitHubService()
 
 # Initialize agents
+# random comment to test commits
 code_quality_agent = CodeQualityAgent(groq_service)
 bug_detection_agent = BugDetectionAgent(groq_service)
 security_agent = SecurityAgent(groq_service)
@@ -64,7 +65,7 @@ dependency_agent = DependencyAgent(groq_service)
 documentation_agent = DocumentationAgent(groq_service)
 coordinator_agent = CoordinatorAgent(groq_service)
 crew_runner = build_crew_runner(code_quality_agent, bug_detection_agent, security_agent, dependency_agent, documentation_agent, coordinator_agent)
-
+print("random comment to test commits")
 async def summarize_comments_per_line(raw_comments: List[Dict]) -> List[Dict]:
     if not raw_comments:
         return []

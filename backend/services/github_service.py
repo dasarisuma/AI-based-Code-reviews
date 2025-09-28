@@ -338,35 +338,3 @@ class GitHubService:
             "modified_lines": modified,
             "context": context
         }
-        """
-        Filter files that are relevant for code review
-        """
-        relevant_extensions = {
-            '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h',
-            '.cs', '.php', '.rb', '.go', '.rs', '.kt', '.swift', '.scala',
-            '.html', '.css', '.scss', '.sass', '.vue', '.svelte'
-        }
-        
-        filtered_files = []
-        for file in files:
-            filename = file["filename"].lower()
-            
-            # Skip certain files
-            if any(skip in filename for skip in [
-                'node_modules/', '.git/', 'dist/', 'build/', 'coverage/',
-                '.min.', 'bundle.', 'vendor/', 'third_party/'
-            ]):
-                continue
-            
-            # Include files with relevant extensions
-            if any(filename.endswith(ext) for ext in relevant_extensions):
-                filtered_files.append(file)
-            
-            # Include certain config files
-            elif any(name in filename for name in [
-                'dockerfile', 'requirements.txt', 'package.json', 
-                'pom.xml', 'build.gradle', '.env'
-            ]):
-                filtered_files.append(file)
-        
-        return filtered_files

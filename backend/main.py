@@ -7,7 +7,6 @@ from typing import Dict, List, Optional
 import os
 from datetime import datetime
 
-from agents.coordinator import CoordinatorAgent
 from agents.code_quality import CodeQualityAgent
 from agents.bug_detection import BugDetectionAgent
 from agents.security import SecurityAgent
@@ -15,7 +14,6 @@ from agents.dependency import DependencyAgent
 from agents.documentation import DocumentationAgent
 from services.github_service import GitHubService
 from services.groq_service import GroqService
-from crew_integration import build_crew_runner
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -63,8 +61,8 @@ bug_detection_agent = BugDetectionAgent(groq_service)
 security_agent = SecurityAgent(groq_service)
 dependency_agent = DependencyAgent(groq_service)
 documentation_agent = DocumentationAgent(groq_service)
-coordinator_agent = CoordinatorAgent(groq_service)
-crew_runner = build_crew_runner(code_quality_agent, bug_detection_agent, security_agent, dependency_agent, documentation_agent, coordinator_agent)
+coordinator_agent = None  # Coordinator removed in simplified version
+crew_runner = None
 print("random comment to test commits")
 async def summarize_comments_per_line(raw_comments: List[Dict]) -> List[Dict]:
     if not raw_comments:
@@ -176,29 +174,24 @@ async def review_pull_request(request: PRReviewRequest):
         pr_data = await github_service.fetch_pr_data(request.pr_url, request.github_token)
         print("PR DATA IS ", pr_data, "END OF PR DATA")
         # Decide execution mode (CrewAI vs legacy)
-        use_crewai = os.getenv("CREW_AI_ENABLED", "false").lower() in ["1", "true", "yes"]
-        if use_crewai:
-            logger.info("Running analysis via CrewAI orchestration layer")
-            compiled_results = await crew_runner.run(pr_data)
-        else:
-            logger.info("Running legacy concurrent agent analysis")
-            agent_tasks = [
-                code_quality_agent.analyze(pr_data),
-                bug_detection_agent.analyze(pr_data),
-                security_agent.analyze(pr_data),
-                dependency_agent.analyze(pr_data),
-                documentation_agent.analyze(pr_data)
-            ]
-            agent_results = await asyncio.gather(*agent_tasks, return_exceptions=True)
-            compiled_results = {}
-            agent_names = ["CodeQuality", "BugDetection", "Security", "Dependency", "Documentation"]
-            for i, result in enumerate(agent_results):
-                agent_name = agent_names[i]
-                if isinstance(result, Exception):
-                    logger.error(f"Agent {agent_name} failed: {result}")
-                    compiled_results[agent_name] = [{"line": 0, "message": f"Agent failed: {str(result)}", "severity": "error"}]
-                else:
-                    compiled_results[agent_name] = result if result else []
+        logger.info("Running concurrent agent analysis")
+        agent_tasks = [
+            code_quality_agent.analyze(pr_data),
+            bug_detection_agent.analyze(pr_data),
+            security_agent.analyze(pr_data),
+            dependency_agent.analyze(pr_data),
+            documentation_agent.analyze(pr_data)
+        ]
+        agent_results = await asyncio.gather(*agent_tasks, return_exceptions=True)
+        compiled_results = {}
+        agent_names = ["CodeQuality", "BugDetection", "Security", "Dependency", "Documentation"]
+        for i, result in enumerate(agent_results):
+            agent_name = agent_names[i]
+            if isinstance(result, Exception):
+                logger.error(f"Agent {agent_name} failed: {result}")
+                compiled_results[agent_name] = [{"line": 0, "message": f"Agent failed: {str(result)}", "severity": "error"}]
+            else:
+                compiled_results[agent_name] = result if result else []
         
         # Flatten to unified comments list
         unified_comments: List[Dict] = []
@@ -220,23 +213,16 @@ async def review_pull_request(request: PRReviewRequest):
         aggregated_comments = await summarize_comments_per_line(unified_comments)
 
         # Coordinate final review
-        logger.info("Coordinating final review...")
-        try:
-            final_review = await coordinator_agent.coordinate(compiled_results, pr_data)
-            summary = final_review.get("summary", "Review completed")
-            final_status = final_review.get("status", "Needs Changes")
-        except Exception as e:
-            logger.error(f"Coordinator failed: {e}")
-            total_issues = len(unified_comments)
-            if total_issues == 0:
-                summary = "✅ No issues found in this PR"
-                final_status = "Approve"
-            elif total_issues <= 3:
-                summary = f"⚠️ {total_issues} minor issues found"
-                final_status = "Needs Changes"
-            else:
-                summary = f"🔴 {total_issues} issues found requiring attention"
-                final_status = "Needs Changes"
+        total_issues = len(unified_comments)
+        if total_issues == 0:
+            summary = "✅ No issues found in this PR"
+            final_status = "Approve"
+        elif total_issues <= 3:
+            summary = f"⚠️ {total_issues} minor issues found"
+            final_status = "Needs Changes"
+        else:
+            summary = f"🔴 {total_issues} issues found requiring attention"
+            final_status = "Needs Changes"
 
         execution_time = (datetime.now() - start_time).total_seconds()
 

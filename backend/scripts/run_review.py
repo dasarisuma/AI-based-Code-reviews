@@ -26,7 +26,6 @@ from agents.bug_detection import BugDetectionAgent
 from agents.security import SecurityAgent
 from agents.dependency import DependencyAgent
 from agents.documentation import DocumentationAgent
-from agents.coordinator import CoordinatorAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

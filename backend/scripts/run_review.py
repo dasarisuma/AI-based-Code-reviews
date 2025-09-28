@@ -97,6 +97,84 @@ def get_severity_weight(severity):
 def determine_final_status(comments):
     return status_from_comments(c.get("severity", "info") for c in comments)
 
+def run_git_command(cmd):
+    """Run a git command and return stdout."""
+    import subprocess
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Git command failed: {' '.join(cmd)}\nError: {e.stderr}")
+
+def split_patches(diff_output):
+    """Split unified diff output into per-file patches."""
+    lines = diff_output.split('\n')
+    patches = []
+    current_file = None
+    buf = []
+    
+    for line in lines:
+        if line.startswith('diff --git'):
+            if current_file and buf:
+                patches.append({"file": current_file, "patch": '\n'.join(buf)})
+            # Extract filename from diff --git a/path b/path
+            parts = line.split()
+            if len(parts) >= 4:
+                current_file = parts[3][2:]  # Remove 'b/' prefix
+            buf = []
+        if line.startswith('@@') or line.startswith('+') or line.startswith('-') or line.startswith(' '):
+            buf.append(line)
+    if current_file and buf:
+        patches.append({"file": current_file, "patch": '\n'.join(buf)})
+    return patches
+
+def build_local_diff_pr_data(base_ref: str, head_ref: str, gh_service: GitHubService) -> Dict:
+    """Build PR-like data structure from local git diff."""
+    if not base_ref or not head_ref:
+        raise ValueError("Both base_ref and head_ref required for local diff mode")
+    
+    # Ensure refs exist
+    if '/' in base_ref:
+        run_git_command(['git', 'fetch', '--quiet', 'origin', base_ref])
+    if '/' in head_ref:
+        run_git_command(['git', 'fetch', '--quiet', 'origin', head_ref])
+    
+    # Get diff between refs
+    diff = run_git_command(['git', 'diff', f'{base_ref}..{head_ref}', '--unified=0', '--no-color'])
+    patch_entries = split_patches(diff)
+    
+    files: List[Dict] = []
+    for entry in patch_entries:
+        patch = entry['patch']
+        if not patch:
+            continue
+        try:
+            parsed = gh_service._extract_changes_v2(patch)  # reuse internal parser
+        except Exception:
+            continue
+            
+        unified_changes: List[Dict] = []
+        for a in parsed['added_lines']:
+            unified_changes.append({"type": "added", "line": a['line_number'], "new_code": a['content']})
+        for r in parsed['removed_lines']:
+            unified_changes.append({"type": "removed", "line": r['line_number'], "old_code": r['content']})
+        for m in parsed['modified_lines']:
+            unified_changes.append({
+                "type": "modified",
+                "old_line": m.get('old_line_number', m.get('line_number')),
+                "new_line": m.get('new_line_number', m.get('line_number')),
+                "old_code": m['old_content'],
+                "new_code": m['new_content']
+            })
+        if unified_changes:
+            files.append({"filename": entry['file'], "changes": unified_changes})
+    
+    return {
+        "title": f"Local diff {base_ref}..{head_ref}",
+        "pr_url": None,
+        "files": files
+    }
+
 async def main():
     parser = argparse.ArgumentParser(description="AI Code Review Analysis")
     # Source selection
@@ -322,71 +400,3 @@ async def main():
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
-
-# ----------------- Helper Functions (Local Diff Mode) -----------------
-
-def run_git_command(cmd: List[str]) -> str:
-    try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
-        return out
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Git command failed: {' '.join(cmd)}\n{e.output}")
-
-def split_patches(diff_text: str) -> List[Dict[str, str]]:
-    patches = []
-    current: Dict[str, Optional[str]] = {"file": None, "patch": None}
-    lines = diff_text.splitlines()
-    buf: List[str] = []
-    current_file: Optional[str] = None
-    for line in lines:
-        if line.startswith('diff --git'):
-            # flush
-            if current_file and buf:
-                patches.append({"file": current_file, "patch": '\n'.join(buf)})
-            buf = []
-            current_file = None
-        if line.startswith('+++ b/'):
-            current_file = line[6:].strip()
-        if line.startswith('@@') or line.startswith('+') or line.startswith('-') or line.startswith(' '):
-            buf.append(line)
-    if current_file and buf:
-        patches.append({"file": current_file, "patch": '\n'.join(buf)})
-    return patches
-
-def build_local_diff_pr_data(base_ref: str, head_ref: str, gh_service: GitHubService) -> Dict:
-    if not base_ref or not head_ref:
-        raise ValueError("Both base_ref and head_ref required for local diff mode")
-    # Ensure refs exist
-    run_git_command(['git', 'fetch', '--quiet', 'origin', base_ref]) if '/' in base_ref else None
-    run_git_command(['git', 'fetch', '--quiet', 'origin', head_ref]) if '/' in head_ref else None
-    diff = run_git_command(['git', 'diff', f'{base_ref}..{head_ref}', '--unified=0', '--no-color'])
-    patch_entries = split_patches(diff)
-    files: List[Dict] = []
-    for entry in patch_entries:
-        patch = entry['patch']
-        if not patch:
-            continue
-        try:
-            parsed = gh_service._extract_changes_v2(patch)  # reuse internal parser
-        except Exception:
-            continue
-        unified_changes: List[Dict] = []
-        for a in parsed['added_lines']:
-            unified_changes.append({"type": "added", "line": a['line_number'], "new_code": a['content']})
-        for r in parsed['removed_lines']:
-            unified_changes.append({"type": "removed", "line": r['line_number'], "old_code": r['content']})
-        for m in parsed['modified_lines']:
-            unified_changes.append({
-                "type": "modified",
-                "old_line": m.get('old_line_number', m.get('line_number')),
-                "new_line": m.get('new_line_number', m.get('line_number')),
-                "old_code": m['old_content'],
-                "new_code": m['new_content']
-            })
-        if unified_changes:
-            files.append({"filename": entry['file'], "changes": unified_changes})
-    return {
-        "title": f"Local diff {base_ref}..{head_ref}",
-        "pr_url": None,
-        "files": files
-    }

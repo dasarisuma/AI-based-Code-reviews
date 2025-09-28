@@ -1,0 +1,195 @@
+pipeline {
+    agent any
+    
+    environment {
+        GITHUB_TOKEN = credentials('github-pat')
+        GROQ_API_KEY = credentials('groq-api-key')
+        PYTHON_VENV = "${WORKSPACE}/venv"
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    
+    triggers {
+        // Trigger on GitHub webhook
+        githubPush()
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    // Check if this is a PR build
+                    env.IS_PR = env.CHANGE_ID ? 'true' : 'false'
+                    if (env.IS_PR == 'true') {
+                        env.PR_URL = "https://github.com/${env.CHANGE_AUTHOR}/${env.JOB_NAME.split('/')[0]}/pull/${env.CHANGE_ID}"
+                        echo "Building PR: ${env.PR_URL}"
+                    } else {
+                        echo "Not a PR build, skipping AI review"
+                    }
+                }
+            }
+        }
+        
+        stage('Setup Python') {
+            when {
+                expression { env.IS_PR == 'true' }
+            }
+            steps {
+                dir('backend') {
+                    script {
+                        // Create virtual environment if it doesn't exist
+                        if (!fileExists("${env.PYTHON_VENV}")) {
+                            sh """
+                                python3 -m venv ${env.PYTHON_VENV}
+                                ${env.PYTHON_VENV}/bin/pip install --upgrade pip
+                            """
+                        }
+                        
+                        // Install dependencies
+                        sh """
+                            ${env.PYTHON_VENV}/bin/pip install -r requirements.txt
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('AI Code Review') {
+            when {
+                expression { env.IS_PR == 'true' }
+            }
+            steps {
+                dir('backend') {
+                    script {
+                        try {
+                            sh """
+                                ${env.PYTHON_VENV}/bin/python scripts/run_review.py \\
+                                    --pr-url "${env.PR_URL}" \\
+                                    --github-token "${GITHUB_TOKEN}" \\
+                                    --output ../review.json \\
+                                    --verbose
+                            """
+                        } catch (Exception e) {
+                            echo "AI review failed: ${e.getMessage()}"
+                            currentBuild.result = 'UNSTABLE'
+                        }
+                        
+                        // Process results
+                        dir('..') {
+                            if (fileExists('review.json')) {
+                                def review = readJSON file: 'review.json'
+                                def finalStatus = review.final_status ?: 'Unknown'
+                                def totalIssues = review.comments?.size() ?: 0
+                                
+                                echo "AI Review Results:"
+                                echo "- Status: ${finalStatus}"
+                                echo "- Total Issues: ${totalIssues}"
+                                
+                                // Count severity levels
+                                def criticalCount = review.comments?.count { 
+                                    it.severity in ['critical', 'error'] 
+                                } ?: 0
+                                def highCount = review.comments?.count { 
+                                    it.severity in ['high', 'warning'] 
+                                } ?: 0
+                                
+                                echo "- Critical/Error: ${criticalCount}"
+                                echo "- High/Warning: ${highCount}"
+                                
+                                // Set build status based on severity
+                                if (criticalCount > 0) {
+                                    echo "❌ Critical issues found. Marking build as FAILED."
+                                    currentBuild.result = 'FAILURE'
+                                } else if (highCount > 0) {
+                                    echo "⚠️ High severity issues found. Marking build as UNSTABLE."
+                                    currentBuild.result = 'UNSTABLE'
+                                } else {
+                                    echo "✅ No blocking issues found."
+                                }
+                                
+                                // Show top issues
+                                if (review.comments && review.comments.size() > 0) {
+                                    echo "\nTop Issues:"
+                                    review.comments.take(5).each { comment ->
+                                        echo "- ${comment.file}:${comment.line} [${comment.severity}] ${comment.message}"
+                                    }
+                                }
+                            } else {
+                                echo "❌ No review results found"
+                                currentBuild.result = 'UNSTABLE'
+                            }
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    // Archive the review results
+                    archiveArtifacts artifacts: 'review.json', allowEmptyArchive: true
+                    
+                    // Publish results as build description
+                    script {
+                        if (fileExists('review.json')) {
+                            def review = readJSON file: 'review.json'
+                            def summary = review.summary ?: 'AI Review completed'
+                            currentBuild.description = summary
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy') {
+            when {
+                branch 'main'
+                expression { currentBuild.result != 'FAILURE' }
+            }
+            steps {
+                echo "🚀 Deploying to production..."
+                // Add your deployment steps here
+                // For example, deploy to Fly.io, Docker registry, etc.
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Clean up workspace selectively
+            script {
+                if (fileExists('review.json')) {
+                    echo "Review artifact preserved"
+                }
+            }
+        }
+        
+        failure {
+            // Notify on failure
+            script {
+                if (env.IS_PR == 'true') {
+                    echo "PR ${env.PR_URL} failed AI review"
+                    // Add notification logic here (Slack, email, etc.)
+                }
+            }
+        }
+        
+        unstable {
+            script {
+                if (env.IS_PR == 'true') {
+                    echo "PR ${env.PR_URL} has warnings from AI review"
+                }
+            }
+        }
+        
+        success {
+            script {
+                if (env.IS_PR == 'true') {
+                    echo "PR ${env.PR_URL} passed AI review ✅"
+                }
+            }
+        }
+    }
+}

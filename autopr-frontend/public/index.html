@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#6366f1" />
+    <meta name="description" content="AutoPR - AI-Powered Code Review System" />
+    <title>AutoPR - AI Code Review</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            animation: {
+              'bounce-slow': 'bounce 2s infinite',
+              'pulse-slow': 'pulse 3s infinite',
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+      body {
+        font-family: 'Inter', sans-serif;
+      }
+      
+      /* Custom gradient animations */
+      @keyframes gradient-x {
+        0%, 100% {
+          background-size: 200% 200%;
+          background-position: left center;
+        }
+        50% {
+          background-size: 200% 200%;
+          background-position: right center;
+        }
+      }
+      
+      .animate-gradient-x {
+        animation: gradient-x 3s ease infinite;
+      }
+      
+      /* Glow effect */
+      .glow {
+        box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+      }
+      
+      /* Custom scrollbar */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f5f9;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: linear-gradient(45deg, #8b5cf6, #ec4899);
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>

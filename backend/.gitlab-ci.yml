@@ -1,0 +1,88 @@
+stages:
+  - install
+  - test
+  - review
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths:
+    - .cache/pip/
+    - backend/.venv/
+
+before_script:
+  - cd backend
+
+install_dependencies:
+  stage: install
+  image: python:3.11-slim
+  script:
+    - python -m venv .venv
+    - source .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install -r requirements.txt
+  artifacts:
+    paths:
+      - backend/.venv/
+    expire_in: 1 hour
+
+ai_code_review:
+  stage: review
+  image: python:3.11-slim
+  dependencies:
+    - install_dependencies
+  variables:
+    GROQ_API_KEY: $GROQ_API_KEY
+    GITHUB_TOKEN: $GITHUB_TOKEN
+  script:
+    - source .venv/bin/activate
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then
+        PR_URL="$CI_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"
+        echo "Analyzing merge request: $PR_URL"
+        
+        python scripts/run_review.py \
+          --pr-url "$PR_URL" \
+          --github-token "$GITHUB_TOKEN" \
+          --output ../review.json \
+          --verbose || REVIEW_EXIT_CODE=$?
+        
+        # Show results
+        cd ..
+        if [ -f review.json ]; then
+          echo "Review completed. Results:"
+          cat review.json | jq -r '.summary'
+          
+          # Check for blocking issues
+          CRITICAL_COUNT=$(cat review.json | jq -r '[.comments[] | select(.severity == "critical" or .severity == "error")] | length')
+          HIGH_COUNT=$(cat review.json | jq -r '[.comments[] | select(.severity == "high" or .severity == "warning")] | length')
+          
+          echo "Critical/Error issues: $CRITICAL_COUNT"
+          echo "High/Warning issues: $HIGH_COUNT"
+          
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical issues found. Failing pipeline."
+            exit 1
+          elif [ "$HIGH_COUNT" -gt 0 ]; then
+            echo "⚠️  High severity issues found. Consider addressing them."
+            exit 2
+          else
+            echo "✅ No blocking issues found."
+          fi
+        else
+          echo "❌ Review failed - no output generated"
+          exit 1
+        fi
+      else
+        echo "Not a merge request. Skipping AI review."
+      fi
+  artifacts:
+    when: always
+    paths:
+      - review.json
+    reports:
+      junit: review.json
+    expire_in: 1 week
+  only:
+    - merge_requests

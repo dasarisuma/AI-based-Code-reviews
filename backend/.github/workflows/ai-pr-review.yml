@@ -1,0 +1,236 @@
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run AI Code Review
+        id: review
+        run: |
+          cd backend
+          python scripts/run_review.py \
+            --pr-url "${{ github.event.pull_request.html_url }}" \
+            --github-token "${{ secrets.GITHUB_TOKEN }}" \
+            --output ../review.json \
+            --verbose
+        continue-on-error: true
+
+      - name: Parse review results
+        id: parse
+        run: |
+          if [ -f review.json ]; then
+            # Extract key information
+            FINAL_STATUS=$(jq -r '.final_status // "Unknown"' review.json)
+            TOTAL_ISSUES=$(jq -r '.comments | length' review.json)
+            SUMMARY=$(jq -r '.summary // "Review completed"' review.json)
+            
+            echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+            echo "total_issues=$TOTAL_ISSUES" >> $GITHUB_OUTPUT
+            echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+            
+            # Count severity levels
+            CRITICAL=$(jq -r '[.comments[] | select(.severity == "critical" or .severity == "error")] | length' review.json)
+            HIGH=$(jq -r '[.comments[] | select(.severity == "high" or .severity == "warning")] | length' review.json)
+            MEDIUM=$(jq -r '[.comments[] | select(.severity == "medium")] | length' review.json)
+            LOW=$(jq -r '[.comments[] | select(.severity == "low" or .severity == "info")] | length' review.json)
+            
+            echo "critical_count=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high_count=$HIGH" >> $GITHUB_OUTPUT
+            echo "medium_count=$MEDIUM" >> $GITHUB_OUTPUT
+            echo "low_count=$LOW" >> $GITHUB_OUTPUT
+            
+            echo "Review completed successfully"
+            cat review.json
+          else
+            echo "final_status=Error" >> $GITHUB_OUTPUT
+            echo "total_issues=0" >> $GITHUB_OUTPUT
+            echo "summary=Review failed - no output generated" >> $GITHUB_OUTPUT
+            echo "Review failed - no review.json found"
+          fi
+
+      - name: Create review summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let reviewData = {};
+            try {
+              reviewData = JSON.parse(fs.readFileSync('review.json', 'utf8'));
+            } catch (error) {
+              console.log('Could not read review.json:', error.message);
+              reviewData = { 
+                final_status: 'Error', 
+                summary: 'Review failed to complete',
+                comments: [],
+                error: error.message
+              };
+            }
+            
+            const status = reviewData.final_status || 'Unknown';
+            const comments = reviewData.comments || [];
+            const totalIssues = comments.length;
+            
+            // Count by severity
+            const severityCounts = comments.reduce((acc, comment) => {
+              const severity = comment.severity || 'info';
+              acc[severity] = (acc[severity] || 0) + 1;
+              return acc;
+            }, {});
+            
+            // Create status emoji
+            const statusEmoji = {
+              'Approve': '✅',
+              'Needs Changes': '⚠️', 
+              'Reject': '❌',
+              'Error': '💥'
+            };
+            
+            // Build comment body
+            let body = `## 🤖 AI Code Review Results\n\n`;
+            body += `**Status:** ${statusEmoji[status] || '❓'} **${status}**\n`;
+            body += `**Total Issues:** ${totalIssues}\n\n`;
+            
+            if (Object.keys(severityCounts).length > 0) {
+              body += `### Issue Breakdown\n`;
+              const severityOrder = ['critical', 'error', 'high', 'warning', 'medium', 'low', 'info'];
+              for (const severity of severityOrder) {
+                if (severityCounts[severity]) {
+                  const emoji = {
+                    'critical': '🚨', 'error': '🚨',
+                    'high': '🔴', 'warning': '🔴', 
+                    'medium': '🟡',
+                    'low': '🔵', 'info': '🔵'
+                  };
+                  body += `- ${emoji[severity] || '📝'} **${severity.charAt(0).toUpperCase() + severity.slice(1)}:** ${severityCounts[severity]}\n`;
+                }
+              }
+              body += `\n`;
+            }
+            
+            // Add top issues (limit to 5 most severe)
+            if (comments.length > 0) {
+              const sortedComments = comments
+                .sort((a, b) => {
+                  const severityWeight = { critical: 0, error: 0, high: 1, warning: 1, medium: 2, low: 3, info: 3 };
+                  return (severityWeight[a.severity] || 3) - (severityWeight[b.severity] || 3);
+                })
+                .slice(0, 5);
+                
+              body += `### Key Issues\n`;
+              for (const comment of sortedComments) {
+                const severityEmoji = {
+                  'critical': '🚨', 'error': '🚨',
+                  'high': '🔴', 'warning': '🔴',
+                  'medium': '🟡', 'low': '🔵', 'info': '🔵'
+                };
+                body += `${severityEmoji[comment.severity] || '📝'} **\`${comment.file}:${comment.line}\`** - ${comment.message}\n`;
+                if (comment.suggestion) {
+                  body += `   💡 *${comment.suggestion}*\n`;
+                }
+                body += `\n`;
+              }
+            }
+            
+            if (reviewData.pr_info) {
+              body += `### PR Info\n`;
+              body += `- **Files Changed:** ${reviewData.pr_info.files_changed || 0}\n`;
+              if (reviewData.total_changes) {
+                body += `- **Total Changes:** ${reviewData.total_changes}\n`;
+              }
+              if (reviewData.execution_time) {
+                body += `- **Analysis Time:** ${reviewData.execution_time.toFixed(1)}s\n`;
+              }
+              body += `\n`;
+            }
+            
+            body += `<details>\n<summary>View detailed analysis (JSON)</summary>\n\n\`\`\`json\n${JSON.stringify(reviewData, null, 2)}\n\`\`\`\n</details>`;
+            
+            // Post comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Upload review artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai-review-results
+          path: review.json
+          retention-days: 30
+
+      - name: Set PR status check
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const status = '${{ steps.parse.outputs.final_status }}';
+            const criticalCount = parseInt('${{ steps.parse.outputs.critical_count }}') || 0;
+            const highCount = parseInt('${{ steps.parse.outputs.high_count }}') || 0;
+            
+            let conclusion = 'success';
+            let summary = 'No blocking issues found';
+            
+            if (status === 'Error') {
+              conclusion = 'failure';
+              summary = 'AI review failed to complete';
+            } else if (criticalCount > 0) {
+              conclusion = 'failure';
+              summary = `${criticalCount} critical issue(s) found`;
+            } else if (highCount > 0) {
+              conclusion = 'neutral';
+              summary = `${highCount} high severity issue(s) found`;
+            }
+            
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'AI Code Review',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: 'AI Code Review Results',
+                summary: summary,
+                text: '${{ steps.parse.outputs.summary }}'
+              }
+            });
+
+      - name: Fail on critical issues
+        if: steps.parse.outputs.critical_count > 0
+        run: |
+          echo "❌ Found ${{ steps.parse.outputs.critical_count }} critical issue(s). Failing the build."
+          exit 1

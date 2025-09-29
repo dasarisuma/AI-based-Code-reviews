@@ -134,9 +134,18 @@ def build_local_diff_pr_data(base_ref: str, head_ref: str, gh_service: GitHubSer
         raise ValueError("Both base_ref and head_ref required for local diff mode")
     
     # Ensure refs exist
-    if '/' in base_ref:
+    if '/' in base_ref and base_ref.startswith('origin/'):
+        # Extract branch name from origin/branch format
+        branch_name = base_ref.split('/')[-1]
+        run_git_command(['git', 'fetch', '--quiet', 'origin', branch_name])
+    elif '/' in base_ref:
         run_git_command(['git', 'fetch', '--quiet', 'origin', base_ref])
-    if '/' in head_ref:
+    
+    if '/' in head_ref and head_ref.startswith('origin/'):
+        # Extract branch name from origin/branch format  
+        branch_name = head_ref.split('/')[-1]
+        run_git_command(['git', 'fetch', '--quiet', 'origin', branch_name])
+    elif '/' in head_ref:
         run_git_command(['git', 'fetch', '--quiet', 'origin', head_ref])
     
     # Get diff between refs
